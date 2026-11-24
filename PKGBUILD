@@ -59,6 +59,8 @@ options=(
 )
 source=(
   "https://archive.mesa3d.org/mesa-${pkgver}.tar.xz"
+  "0001-nouveau-nvk-nak-initial-Fermi-NVC3-SM20-bring-up.patch"
+  "0002-nouveau-nvk-nak-Fermi-bound-textures-and-NV9039-M2MF.patch"
 )
 
 # Rust crates required by Mesa NVK / NAK subprojects (Mesa 26.3.1)
@@ -104,6 +106,8 @@ for _crate in "${!_crates[@]}"; do
 done
 
 sha256sums=('4e4e438eac7b840a9383988cbb7c08dad8041da544b9319fc26d319fa7348961'
+            'SKIP'
+            'SKIP'
             'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'

@@ -39,14 +39,15 @@ Target hardware: NVIDIA GeForce GT 555M (`GF106M`, `NVC3`, Fermi `SM21`, `FERMI_
 ## 2. Milestones
 
 ### Milestone 1: Bring-Up (`vulkaninfo` + `vkcube`)
-- [ ] Verify `nouveau-dkms` `VM_BIND` + `EXEC` syncobj ioctls with `NVK` winsys on `GF106M` (`NVC3`).
-- [ ] Lower `nvk_physical_device.c` chipset gate from `KEPLER_A` to `FERMI_A` (guarded behind an opt-in env var or `nvk-fermi` patch) and gate unsupported Vulkan 1.2+/Kepler+ features.
-- [ ] Add `sm < 30` (no-`sched`-word) shader emission path in `nak/sm20.rs` and verify minimal vertex + fragment shaders compile and execute on `0x9097`.
-- [ ] Adapt `0x9097` 3D state setup (`SPH` / `MME` / `0x90b5` copy) so `vulkaninfo` enumerates `GF106M` and `vkcube` renders cleanly on X11/Wayland WSI.
+- [x] Verify `nouveau-dkms` `VM_BIND` + `EXEC` syncobj ioctls with `NVK` winsys on `GF106M` (`NVC3`).
+- [x] Lower `nvk_physical_device.c` chipset gate from `KEPLER_A` to `FERMI_A` (guarded behind `NVK_I_WANT_A_BROKEN_VULKAN_DRIVER=1` / `nvk-fermi` patch) and gate unsupported Kepler+ init/copy methods.
+- [x] Verify `SM21` (`encode_sm20_shader`) shader emission compiles and executes vertex + fragment shaders cleanly on `0x9097`.
+- [x] Adapt `0x9097` 3D state setup (`SPH` / `NV9039` M2MF copy) so `vulkaninfo` enumerates `GF106M` and `vkcube --wsi wayland` renders cleanly (**101.8 FPS**, zero kernel faults).
 
 ### Milestone 2: Bound Descriptors & `0x90c0` Compute
-- [ ] Implement NIR bound-descriptor lowering pass mapping `VkDescriptorSet` sampled images/samplers to Fermi's 128 `TIC` / 32 `TSC` slots (`TexRef::Bound(idx)`).
-- [ ] Emit `NVC0_3D_BIND_TIC` / `NVC0_3D_BIND_TSC` updates in `nvk_cmd_draw.c` on descriptor set bind / draw validation.
+- [x] Implement NIR bound-descriptor lowering pass mapping constant-index `VkDescriptorSet` sampled images/samplers to Fermi `TIC`/`TSC` slots (`TexRef::Bound(idx)` via `nvk_bound_tex_map`).
+- [x] Emit `BIND_TIC` / `BIND_TSC` updates in `nvk_cmd_draw.c` / `nvk_cmd_dispatch.c` via `nvk_cmd_buffer_emit_bound_tex()`.
+- [ ] Handle dynamic/non-constant descriptor array indexing (waterfall loop) and `txs`/`txq` bound-texture queries if needed.
 - [ ] Implement `FERMI_COMPUTE_A` (`0x90c0`) dispatch path in `nvk_cmd_dispatch.c`.
 - [ ] Implement 8-slot `SU` storage image binding (`SULD`/`SUST`).
 - [ ] Verify with textured Vulkan 1.0/1.1 workloads: `vkmark`, `mpv --gpu-api=vulkan`, PPSSPP / RetroArch Vulkan, and **Dolphin Emulator Vulkan backend**.
