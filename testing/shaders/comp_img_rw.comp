@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, r32ui) readonly uniform uimage2D u_src;
+layout(set = 0, binding = 1, r32ui) writeonly uniform uimage2D u_dst;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint v = imageLoad(u_src, p).x;
+    imageStore(u_dst, p, uvec4(v * 3u + 1u, 0u, 0u, 0u));
+}

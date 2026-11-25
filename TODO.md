@@ -47,13 +47,14 @@ Target hardware: NVIDIA GeForce GT 555M (`GF106M`, `NVC3`, Fermi `SM21`, `FERMI_
 ### Milestone 2: Bound Descriptors & `0x90c0` Compute
 - [x] Implement NIR bound-descriptor lowering pass mapping constant-index `VkDescriptorSet` sampled images/samplers to Fermi `TIC`/`TSC` slots (`TexRef::Bound(idx)` via `nvk_bound_tex_map`).
 - [x] Emit `BIND_TIC` / `BIND_TSC` updates in `nvk_cmd_draw.c` / `nvk_cmd_dispatch.c` via `nvk_cmd_buffer_emit_bound_tex()`.
-- [ ] Handle dynamic/non-constant descriptor array indexing (waterfall loop) and `txs`/`txq` bound-texture queries if needed.
-- [ ] Implement `FERMI_COMPUTE_A` (`0x90c0`) dispatch path in `nvk_cmd_dispatch.c`.
-- [ ] Implement 8-slot `SU` storage image binding (`SULD`/`SUST`).
-- [ ] Verify with textured Vulkan 1.0/1.1 workloads: `vkmark`, `mpv --gpu-api=vulkan`, PPSSPP / RetroArch Vulkan, and **Dolphin Emulator Vulkan backend**.
+- [x] Handle dynamic/non-constant descriptor array indexing (waterfall loop) and `txs`/`txq` bound-texture queries (`emit_fermi_tex_waterfall` + `NAK_NIR_TEX_REF_TYPE_BOUND` in `build_txq`).
+- [x] Implement `FERMI_COMPUTE_A` (`0x90c0`) dispatch path in `nvk_cmd_dispatch.c` (init, `nvk_cmd_dispatch_fermi`, and `NVK_MME_SELECT_CB0` restoration for 3D/compute interop).
+- [x] Implement 8-slot `SU` storage image binding (`SULD`/`SUST` via `nvk_bound_su_map`, `nvk_cmd_buffer_emit_bound_su`, and `SM20` `OpSuLd`/`OpSuSt`).
+- [x] Add `testing/vk_smoke.c` hardware regression suite covering linear/optimal draws, `NV9039` (`M2MF`) copies, bound textures, `0x90c0` compute SSBO, dynamic texture array + `textureSize()`, and `SU` storage image `imageStore` (6/6 passing, zero `dmesg` faults).
+- [~] Verify with textured Vulkan 1.0/1.1 workloads: `vkcube --wsi wayland` (**102.6 FPS**, zero faults); `mpv --vo=gpu-next --gpu-api=vulkan` currently hits `HUB/PFIFO PAGE_NOT_PRESENT` during `libplacebo` slab/query-pool init (`vkmark`, PPSSPP/RetroArch, Dolphin remaining).
 
 ### Milestone 3: `DXVK 1.10.3`, `Zink` & Packaging
-- [ ] Run targeted Khronos Vulkan 1.0/1.1 CTS subsets and fix remaining `SM20` legalization/lowering edge cases.
-- [ ] Test **DXVK 1.10.3** (Vulkan 1.1 / DirectX 9–11) on Fermi.
-- [ ] Test **Mesa Zink** (OpenGL 4.6 over `nvk-fermi`).
-- [ ] Lock exact crate `sha256sums` in `PKGBUILD`, generate `.SRCINFO`, publish `Twilight0/vulkan-nouveau-aliveos` to GitHub + AUR + `aliveos-repo`.
+- [~] Run targeted Vulkan 1.0/1.1 regression & CTS-like subsets (`deqp-vk` not installed; `testing/vk_smoke.c` expanded to **8/8 passing** including `graphics_indexed_ubo` + `compute_image_rw` `SULD.B`/`SUST.P`, fixed `NV90C0` `CRS_SIZE=0`, `NV90C0_SET_SHADER_LOCAL_MEMORY_E`, `NV9097_BIND_GROUP_CONSTANT_BUFFER(0..4)` + `NV9097_INVALIDATE_SHADER_CACHES` for 3D-after-compute, and `OpSuLd` format-based byte shift).
+- [x] Test **DXVK 1.10.3** (Vulkan 1.1 / DirectX 9–11) on Fermi: `wine 11.22` + `dxvk-1.10-bin` (`dxdiag` + `testing/d3d11_smoke.c`: `D3D11CreateDevice` FL `11_0`, `ClearRenderTargetView`, `Draw` `vs_4_0`/`ps_4_0`, and `Dispatch` `cs_5_0` `RWStructuredBuffer` UAV) all pass (**exit=0**, zero `nouveau` kernel faults) after adding `fermi_su` support to `nvk_buffer_view` (`VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER`).
+- [~] Test **Mesa Zink** (OpenGL 4.6 over `nvk-fermi`): `glxgears` on Zink progressed past `TEMP_TOO_SMALL` and still hits `PGRAPH` `READ at 0x0` (`VK_ERROR_DEVICE_LOST`); needs further Zink descriptor/WSI investigation.
+- [x] Lock exact crate & patch `sha256sums` in `PKGBUILD` and generate `.SRCINFO` (no `SKIP` entries remain; ready to publish `Twilight0/vulkan-nouveau-aliveos` to GitHub + AUR + `aliveos-repo`).

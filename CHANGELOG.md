@@ -4,8 +4,11 @@ All notable changes to **vulkan-nouveau-aliveos** will be documented in this fil
 
 ---
 
-## [Unreleased]
+## [1:26.3.1-3] - 2026-11-25
 
-### Initial Scaffold
-- Created standalone CachyOS-style packaging repository targeting Mesa `26.3.1` (`-Dvulkan-drivers=nouveau`, `-Dgallium-drivers=`) installing `libvulkan_nouveau.so`, `nouveau_icd.json`, and `license.rst` with zero file overlap against `mesa-aliveos` or `extra/mesa`.
-- Added `TODO.md` documenting Mesa `NAK` `sm20.rs` and `NVK` findings and the 3-milestone Fermi Vulkan (`nvk-fermi`) roadmap.
+### Added
+- `0001-nouveau-nvk-nak-initial-Fermi-NVC3-SM20-bring-up.patch`: Initial Fermi (`NVC3`, `SM20`/`SM21`) NAK shader emission and NVK `0x9097` bring-up.
+- `0002-nouveau-nvk-nak-Fermi-bound-textures-and-NV9039-M2MF.patch`: Bound `TIC`/`TSC` descriptor lowering and `NV9039` (`M2MF`) copy engine support.
+- `0003-nouveau-nvk-nak-Fermi-compute-dynamic-tex-txs-and-SU.patch`: `0x90c0` Fermi compute dispatch, dynamic texture array waterfall + `txs`/`txq`, 8-slot `SU` storage images and `VkBufferView` (`fermi_su`), and 3D-after-compute cache/CB0 restoration.
+- `testing/`: Standalone Vulkan (`vk_smoke.c`) and DXVK 1.10.3 (`d3d11_smoke.c`) regression suites with precompiled SPIR-V shader headers.
+- Aligned package version (`epoch=1`, `pkgver=26.3.1`, `pkgrel=3`) with Arch Linux `extra/vulkan-nouveau`.
