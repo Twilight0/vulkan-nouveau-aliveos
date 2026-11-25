@@ -14,6 +14,8 @@
 #include "shaders/comp_img_rw.comp.spv.h"
 #include "shaders/indexed_ubo.vert.spv.h"
 #include "shaders/indexed_ubo.frag.spv.h"
+#include "shaders/frag_depth.vert.spv.h"
+#include "shaders/frag_depth.frag.spv.h"
 
 #define VK_CHECK(call) do { \
     VkResult _r = (call); \
@@ -1235,6 +1237,501 @@ static int test_graphics_indexed_ubo(struct vk_ctx *ctx)
     return err;
 }
 
+static int test_m2mf_blocklinear_gradient(struct vk_ctx *ctx)
+{
+    const uint32_t W = 64, H = 64;
+    const VkDeviceSize size = (VkDeviceSize)W * H * 4;
+    VkBuffer src_buf, dst_buf;
+    VkDeviceMemory src_mem, dst_mem;
+    if (create_buffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      &src_buf, &src_mem)) return 1;
+    if (create_buffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      &dst_buf, &dst_mem)) return 1;
+
+    uint8_t *src_px;
+    VK_CHECK(vkMapMemory(ctx->dev, src_mem, 0, size, 0, (void **)&src_px));
+    for (uint32_t y = 0; y < H; y++) {
+        for (uint32_t x = 0; x < W; x++) {
+            uint8_t *p = &src_px[(y * W + x) * 4];
+            p[0] = (uint8_t)(x * 4);
+            p[1] = (uint8_t)(y * 4);
+            p[2] = (uint8_t)((x ^ y) * 3);
+            p[3] = 255;
+        }
+    }
+    vkUnmapMemory(ctx->dev, src_mem);
+
+    VkImage img;
+    VkDeviceMemory img_mem;
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = { W, H, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    VK_CHECK(vkCreateImage(ctx->dev, &ici, NULL, &img));
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(ctx->dev, img, &req);
+    uint32_t mt = find_mem_type(&ctx->mem_props, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mt == UINT32_MAX) return 1;
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = req.size,
+        .memoryTypeIndex = mt,
+    };
+    VK_CHECK(vkAllocateMemory(ctx->dev, &mai, NULL, &img_mem));
+    VK_CHECK(vkBindImageMemory(ctx->dev, img, img_mem, 0));
+
+    VkCommandBuffer cmd;
+    VkCommandBufferAllocateInfo cbai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = ctx->cmd_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VK_CHECK(vkAllocateCommandBuffers(ctx->dev, &cbai, &cmd));
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
+
+    VkImageMemoryBarrier b1 = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .image = img,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &b1);
+
+    VkBufferImageCopy region = {
+        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .imageExtent = { W, H, 1 },
+    };
+    vkCmdCopyBufferToImage(cmd, src_buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    VkImageMemoryBarrier b2 = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .image = img,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &b2);
+
+    vkCmdCopyImageToBuffer(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buf, 1, &region);
+
+    VK_CHECK(vkEndCommandBuffer(cmd));
+    submit_and_wait(ctx, cmd);
+
+    uint8_t *dst_px;
+    VK_CHECK(vkMapMemory(ctx->dev, dst_mem, 0, size, 0, (void **)&dst_px));
+    int mismatches = 0;
+    for (uint32_t y = 0; y < H; y++) {
+        for (uint32_t x = 0; x < W; x++) {
+            const uint8_t *p = &dst_px[(y * W + x) * 4];
+            uint8_t er = (uint8_t)(x * 4), eg = (uint8_t)(y * 4), eb = (uint8_t)((x ^ y) * 3);
+            if (p[0] != er || p[1] != eg || p[2] != eb || p[3] != 255) {
+                if (mismatches < 5) {
+                    fprintf(stderr, "FAIL m2mf_blocklinear_64x64 at (%u,%u): got=(%u,%u,%u,%u) exp=(%u,%u,%u,255)\n",
+                            x, y, p[0], p[1], p[2], p[3], er, eg, eb);
+                }
+                mismatches++;
+            }
+        }
+    }
+    vkUnmapMemory(ctx->dev, dst_mem);
+
+    vkFreeCommandBuffers(ctx->dev, ctx->cmd_pool, 1, &cmd);
+    vkDestroyImage(ctx->dev, img, NULL);
+    vkFreeMemory(ctx->dev, img_mem, NULL);
+    vkDestroyBuffer(ctx->dev, src_buf, NULL);
+    vkFreeMemory(ctx->dev, src_mem, NULL);
+    vkDestroyBuffer(ctx->dev, dst_buf, NULL);
+    vkFreeMemory(ctx->dev, dst_mem, NULL);
+
+    if (mismatches) {
+        fprintf(stderr, "FAIL m2mf_blocklinear_64x64 (%d mismatches)\n", mismatches);
+        return 1;
+    }
+    printf("PASS m2mf_blocklinear_64x64\n");
+    return 0;
+}
+
+static int test_graphics_bc1(struct vk_ctx *ctx)
+{
+    const uint32_t W = 64, H = 64;
+    const uint32_t TW = 16, TH = 16; /* 4x4 BC1 blocks */
+    /* Each BC1 block is 8 bytes: uint16 c0, uint16 c1, uint32 indices (0 = c0). */
+    uint8_t bc1[16 * 8];
+    memset(bc1, 0, sizeof(bc1));
+    for (uint32_t by = 0; by < 4; by++) {
+        for (uint32_t bx = 0; bx < 4; bx++) {
+            uint8_t *blk = &bc1[(by * 4 + bx) * 8];
+            /* Top-left (bx<2, by<2): pure red (0xF800); else pure green (0x07E0) */
+            uint16_t c0 = (bx < 2 && by < 2) ? 0xF800 : 0x07E0;
+            blk[0] = (uint8_t)(c0 & 0xff);
+            blk[1] = (uint8_t)(c0 >> 8);
+            blk[2] = blk[0];
+            blk[3] = blk[1];
+        }
+    }
+
+    VkBuffer stage;
+    VkDeviceMemory stage_mem;
+    if (create_buffer(ctx, sizeof(bc1), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      &stage, &stage_mem)) return 1;
+    void *mp;
+    VK_CHECK(vkMapMemory(ctx->dev, stage_mem, 0, sizeof(bc1), 0, &mp));
+    memcpy(mp, bc1, sizeof(bc1));
+    vkUnmapMemory(ctx->dev, stage_mem);
+
+    VkImage tex_img, rt_img;
+    VkDeviceMemory tex_mem, rt_mem;
+    VkImageCreateInfo tici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+        .extent = { TW, TH, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+    };
+    VK_CHECK(vkCreateImage(ctx->dev, &tici, NULL, &tex_img));
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(ctx->dev, tex_img, &req);
+    uint32_t mt = find_mem_type(&ctx->mem_props, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = mt };
+    VK_CHECK(vkAllocateMemory(ctx->dev, &mai, NULL, &tex_mem));
+    VK_CHECK(vkBindImageMemory(ctx->dev, tex_img, tex_mem, 0));
+
+    VkImageCreateInfo rici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = { W, H, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    };
+    VK_CHECK(vkCreateImage(ctx->dev, &rici, NULL, &rt_img));
+    vkGetImageMemoryRequirements(ctx->dev, rt_img, &req);
+    mt = find_mem_type(&ctx->mem_props, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    mai.allocationSize = req.size; mai.memoryTypeIndex = mt;
+    VK_CHECK(vkAllocateMemory(ctx->dev, &mai, NULL, &rt_mem));
+    VK_CHECK(vkBindImageMemory(ctx->dev, rt_img, rt_mem, 0));
+
+    VkImageView tex_view, rt_view;
+    VkImageViewCreateInfo tvci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = tex_img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    VK_CHECK(vkCreateImageView(ctx->dev, &tvci, NULL, &tex_view));
+    VkImageViewCreateInfo rvci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = rt_img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    VK_CHECK(vkCreateImageView(ctx->dev, &rvci, NULL, &rt_view));
+
+    VkSampler sampler;
+    VkSamplerCreateInfo sci = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    };
+    VK_CHECK(vkCreateSampler(ctx->dev, &sci, NULL, &sampler));
+
+    VkDescriptorSetLayoutBinding dslb = {
+        .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+    VkDescriptorSetLayout dsl;
+    VkDescriptorSetLayoutCreateInfo dslci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &dslb };
+    VK_CHECK(vkCreateDescriptorSetLayout(ctx->dev, &dslci, NULL, &dsl));
+    VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+    VkDescriptorPool dp;
+    VkDescriptorPoolCreateInfo dpci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &dps };
+    VK_CHECK(vkCreateDescriptorPool(ctx->dev, &dpci, NULL, &dp));
+    VkDescriptorSet ds;
+    VkDescriptorSetAllocateInfo dsai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dp, .descriptorSetCount = 1, .pSetLayouts = &dsl };
+    VK_CHECK(vkAllocateDescriptorSets(ctx->dev, &dsai, &ds));
+    VkDescriptorImageInfo dii = { .sampler = sampler, .imageView = tex_view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet wds = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii };
+    vkUpdateDescriptorSets(ctx->dev, 1, &wds, 0, NULL);
+
+    VkAttachmentDescription att = {
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+    };
+    VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &ref };
+    VkRenderPass rp;
+    VkRenderPassCreateInfo rpci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &att, .subpassCount = 1, .pSubpasses = &sub };
+    VK_CHECK(vkCreateRenderPass(ctx->dev, &rpci, NULL, &rp));
+    VkFramebuffer fb;
+    VkFramebufferCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 1, .pAttachments = &rt_view, .width = W, .height = H, .layers = 1 };
+    VK_CHECK(vkCreateFramebuffer(ctx->dev, &fci, NULL, &fb));
+
+    VkShaderModule vs, fs;
+    if (create_shader_module(ctx->dev, tri_vert_spv, sizeof(tri_vert_spv), &vs)) return 1;
+    if (create_shader_module(ctx->dev, tex_frag_spv, sizeof(tex_frag_spv), &fs)) return 1;
+    VkPipelineLayout pl;
+    VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl };
+    VK_CHECK(vkCreatePipelineLayout(ctx->dev, &plci, NULL, &pl));
+
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" },
+    };
+    VkPipelineVertexInputStateCreateInfo vis = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ias = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkViewport vp = { 0, 0, (float)W, (float)H, 0.0f, 1.0f };
+    VkRect2D sc = { {0, 0}, {W, H} };
+    VkPipelineViewportStateCreateInfo vps = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+    VkPipelineColorBlendAttachmentState cba = { .colorWriteMask = 0xF };
+    VkPipelineColorBlendStateCreateInfo cbs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &cba };
+    VkGraphicsPipelineCreateInfo gpci = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stages,
+        .pVertexInputState = &vis, .pInputAssemblyState = &ias, .pViewportState = &vps,
+        .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cbs,
+        .layout = pl, .renderPass = rp,
+    };
+    VkPipeline pipe;
+    VK_CHECK(vkCreateGraphicsPipelines(ctx->dev, VK_NULL_HANDLE, 1, &gpci, NULL, &pipe));
+
+    VkBuffer rb_buf; VkDeviceMemory rb_mem;
+    if (create_buffer(ctx, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      &rb_buf, &rb_mem)) return 1;
+
+    VkCommandBuffer cmd;
+    VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = ctx->cmd_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VK_CHECK(vkAllocateCommandBuffers(ctx->dev, &cbai, &cmd));
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
+
+    VkImageMemoryBarrier b1 = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .image = tex_img, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b1);
+    VkBufferImageCopy treg = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { TW, TH, 1 } };
+    vkCmdCopyBufferToImage(cmd, stage, tex_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &treg);
+    VkImageMemoryBarrier b2 = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .image = tex_img, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b2);
+
+    VkClearValue cv = { .color = { .float32 = { 0, 0, 0, 1 } } };
+    VkRenderPassBeginInfo rpbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = { {0,0}, {W,H} }, .clearValueCount = 1, .pClearValues = &cv };
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 0, NULL);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    VkBufferImageCopy rreg = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { W, H, 1 } };
+    vkCmdCopyImageToBuffer(cmd, rt_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb_buf, 1, &rreg);
+    VK_CHECK(vkEndCommandBuffer(cmd));
+    submit_and_wait(ctx, cmd);
+
+    uint8_t *px;
+    VK_CHECK(vkMapMemory(ctx->dev, rb_mem, 0, W * H * 4, 0, (void **)&px));
+    /* Check center of top-left quadrant (16,16) -> red, and bottom-right (48,48) -> green */
+    const uint8_t *tl = &px[(16 * W + 16) * 4];
+    const uint8_t *br = &px[(48 * W + 48) * 4];
+    int fail = !(tl[0] > 240 && tl[1] < 10 && br[1] > 240 && br[0] < 10);
+    if (fail)
+        fprintf(stderr, "FAIL graphics_bc1: tl=(%u,%u,%u,%u) br=(%u,%u,%u,%u)\n",
+                tl[0], tl[1], tl[2], tl[3], br[0], br[1], br[2], br[3]);
+    else
+        printf("PASS graphics_bc1\n");
+    vkUnmapMemory(ctx->dev, rb_mem);
+
+    vkFreeCommandBuffers(ctx->dev, ctx->cmd_pool, 1, &cmd);
+    vkDestroyBuffer(ctx->dev, rb_buf, NULL); vkFreeMemory(ctx->dev, rb_mem, NULL);
+    vkDestroyPipeline(ctx->dev, pipe, NULL); vkDestroyPipelineLayout(ctx->dev, pl, NULL);
+    vkDestroyShaderModule(ctx->dev, vs, NULL); vkDestroyShaderModule(ctx->dev, fs, NULL);
+    vkDestroyFramebuffer(ctx->dev, fb, NULL); vkDestroyRenderPass(ctx->dev, rp, NULL);
+    vkDestroyDescriptorPool(ctx->dev, dp, NULL); vkDestroyDescriptorSetLayout(ctx->dev, dsl, NULL);
+    vkDestroySampler(ctx->dev, sampler, NULL);
+    vkDestroyImageView(ctx->dev, tex_view, NULL); vkDestroyImageView(ctx->dev, rt_view, NULL);
+    vkDestroyImage(ctx->dev, tex_img, NULL); vkFreeMemory(ctx->dev, tex_mem, NULL);
+    vkDestroyImage(ctx->dev, rt_img, NULL); vkFreeMemory(ctx->dev, rt_mem, NULL);
+    vkDestroyBuffer(ctx->dev, stage, NULL); vkFreeMemory(ctx->dev, stage_mem, NULL);
+    return fail;
+}
+
+static int test_frag_depth(struct vk_ctx *ctx)
+{
+    const uint32_t W = 64, H = 64;
+    VkImage col_img, ds_img;
+    VkDeviceMemory col_mem, ds_mem;
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { W, H, 1 },
+        .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    };
+    VK_CHECK(vkCreateImage(ctx->dev, &ici, NULL, &col_img));
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(ctx->dev, col_img, &req);
+    uint32_t mt = find_mem_type(&ctx->mem_props, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = mt };
+    VK_CHECK(vkAllocateMemory(ctx->dev, &mai, NULL, &col_mem));
+    VK_CHECK(vkBindImageMemory(ctx->dev, col_img, col_mem, 0));
+
+    ici.format = VK_FORMAT_D32_SFLOAT;
+    ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    VK_CHECK(vkCreateImage(ctx->dev, &ici, NULL, &ds_img));
+    vkGetImageMemoryRequirements(ctx->dev, ds_img, &req);
+    mt = find_mem_type(&ctx->mem_props, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    mai.allocationSize = req.size; mai.memoryTypeIndex = mt;
+    VK_CHECK(vkAllocateMemory(ctx->dev, &mai, NULL, &ds_mem));
+    VK_CHECK(vkBindImageMemory(ctx->dev, ds_img, ds_mem, 0));
+
+    VkImageView col_view, ds_view;
+    VkImageViewCreateInfo vci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = col_img,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    VK_CHECK(vkCreateImageView(ctx->dev, &vci, NULL, &col_view));
+    vci.image = ds_img; vci.format = VK_FORMAT_D32_SFLOAT;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    VK_CHECK(vkCreateImageView(ctx->dev, &vci, NULL, &ds_view));
+
+    VkAttachmentDescription atts[2] = {
+        {
+            .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        },
+        {
+            .format = VK_FORMAT_D32_SFLOAT, .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
+    };
+    VkAttachmentReference cref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkAttachmentReference dref = { 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sub = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1, .pColorAttachments = &cref, .pDepthStencilAttachment = &dref,
+    };
+    VkRenderPass rp;
+    VkRenderPassCreateInfo rpci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 2, .pAttachments = atts, .subpassCount = 1, .pSubpasses = &sub };
+    VK_CHECK(vkCreateRenderPass(ctx->dev, &rpci, NULL, &rp));
+    VkImageView views[2] = { col_view, ds_view };
+    VkFramebuffer fb;
+    VkFramebufferCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 2, .pAttachments = views, .width = W, .height = H, .layers = 1 };
+    VK_CHECK(vkCreateFramebuffer(ctx->dev, &fci, NULL, &fb));
+
+    VkShaderModule vs, fs;
+    if (create_shader_module(ctx->dev, frag_depth_vert_spv, sizeof(frag_depth_vert_spv), &vs)) return 1;
+    if (create_shader_module(ctx->dev, frag_depth_frag_spv, sizeof(frag_depth_frag_spv), &fs)) return 1;
+    VkPipelineLayout pl;
+    VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    VK_CHECK(vkCreatePipelineLayout(ctx->dev, &plci, NULL, &pl));
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" },
+    };
+    VkPipelineVertexInputStateCreateInfo vis = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ias = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkViewport vp = { 0, 0, (float)W, (float)H, 0.0f, 1.0f };
+    VkRect2D sc = { {0, 0}, {W, H} };
+    VkPipelineViewportStateCreateInfo vps = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1.0f };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+    VkPipelineDepthStencilStateCreateInfo dss = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_LESS,
+    };
+    VkPipelineColorBlendAttachmentState cba = { .colorWriteMask = 0xF };
+    VkPipelineColorBlendStateCreateInfo cbs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &cba };
+    VkGraphicsPipelineCreateInfo gpci = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stages,
+        .pVertexInputState = &vis, .pInputAssemblyState = &ias, .pViewportState = &vps,
+        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &dss, .pColorBlendState = &cbs,
+        .layout = pl, .renderPass = rp,
+    };
+    VkPipeline pipe;
+    VK_CHECK(vkCreateGraphicsPipelines(ctx->dev, VK_NULL_HANDLE, 1, &gpci, NULL, &pipe));
+
+    VkBuffer rb; VkDeviceMemory rb_mem;
+    if (create_buffer(ctx, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &rb, &rb_mem)) return 1;
+
+    VkCommandBuffer cmd;
+    if (alloc_cmd(ctx, &cmd)) return 1;
+    VkClearValue cvs[2] = {
+        { .color = { .float32 = { 0, 0, 0, 1 } } },
+        { .depthStencil = { .depth = 0.5f, .stencil = 0 } },
+    };
+    VkRenderPassBeginInfo rpbi = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb,
+        .renderArea = { {0, 0}, {W, H} }, .clearValueCount = 2, .pClearValues = cvs,
+    };
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+    VkBufferImageCopy reg = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { W, H, 1 } };
+    vkCmdCopyImageToBuffer(cmd, col_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb, 1, &reg);
+    if (submit_and_wait(ctx, cmd)) return 1;
+
+    uint8_t *px;
+    VK_CHECK(vkMapMemory(ctx->dev, rb_mem, 0, W * H * 4, 0, (void **)&px));
+    const uint8_t *p1 = &px[(16 * W + 16) * 4];
+    const uint8_t *p2 = &px[(48 * W + 48) * 4];
+    int fail = !(abs((int)p1[0] - 49) <= 3 && abs((int)p2[0] - 97) <= 3 && p1[1] >= 126 && p2[1] >= 126);
+    if (fail)
+        fprintf(stderr, "FAIL graphics_frag_depth: p1=(%u,%u,%u,%u) p2=(%u,%u,%u,%u)\n",
+                p1[0], p1[1], p1[2], p1[3], p2[0], p2[1], p2[2], p2[3]);
+    else
+        printf("PASS graphics_frag_depth\n");
+    vkUnmapMemory(ctx->dev, rb_mem);
+
+    vkDestroyBuffer(ctx->dev, rb, NULL); vkFreeMemory(ctx->dev, rb_mem, NULL);
+    vkDestroyPipeline(ctx->dev, pipe, NULL); vkDestroyPipelineLayout(ctx->dev, pl, NULL);
+    vkDestroyShaderModule(ctx->dev, vs, NULL); vkDestroyShaderModule(ctx->dev, fs, NULL);
+    vkDestroyFramebuffer(ctx->dev, fb, NULL); vkDestroyRenderPass(ctx->dev, rp, NULL);
+    vkDestroyImageView(ctx->dev, col_view, NULL); vkDestroyImageView(ctx->dev, ds_view, NULL);
+    vkDestroyImage(ctx->dev, col_img, NULL); vkFreeMemory(ctx->dev, col_mem, NULL);
+    vkDestroyImage(ctx->dev, ds_img, NULL); vkFreeMemory(ctx->dev, ds_mem, NULL);
+    return fail;
+}
+
 static int test_compute_image_rw(struct vk_ctx *ctx)
 {
     const uint32_t W = 4, H = 4;
@@ -1471,6 +1968,9 @@ int main(void)
     fails += test_graphics(&ctx, false, false);
     fails += test_graphics(&ctx, true, false);
     fails += test_graphics(&ctx, true, true);
+    fails += test_m2mf_blocklinear_gradient(&ctx);
+    fails += test_graphics_bc1(&ctx);
+    fails += test_frag_depth(&ctx);
     fails += test_compute_ssbo(&ctx);
     fails += test_compute_tex_dyn_txs(&ctx);
     fails += test_compute_storage_image(&ctx);

@@ -114,12 +114,27 @@ jobs:
             TAG="v${pkgver}-${pkgrel}"
           fi
 
+          VER="${TAG#v}"
+          NOTES_FILE="/tmp/release-notes.md"
+          awk -v ver="$VER" '
+            /^## \[/ {
+              if (in_sec) exit
+              if ($0 ~ "\\[(1:)?" ver "\\]") { in_sec = 1; next }
+            }
+            in_sec { print }
+          ' CHANGELOG.md > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "Prebuilt Arch Linux / AliveOS package for vulkan-nouveau-aliveos $TAG. See CHANGELOG.md for details." > "$NOTES_FILE"
+          fi
+
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "${{ github.sha }}" \
               --title "vulkan-nouveau-aliveos $TAG" \
-              --notes "Prebuilt Arch Linux / AliveOS package for vulkan-nouveau-aliveos $TAG. See CHANGELOG.md for details." \
+              --notes-file "$NOTES_FILE" \
               --latest
+          else
+            gh release edit "$TAG" --notes-file "$NOTES_FILE"
           fi
 
           gh release upload "$TAG" release-assets/*.pkg.tar.zst release-assets/SHA256SUMS.txt --clobber

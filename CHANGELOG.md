@@ -4,6 +4,16 @@ All notable changes to **vulkan-nouveau-aliveos** will be documented in this fil
 
 ---
 
+## [1:26.3.1-5] - 2026-11-25
+
+### Fixed
+- `0005-nouveau-nak-SM20-place-oDepth-immediately-after-colo.patch`:
+  - Fix Fermi (`SM20`) fragment shader `oDepth` (`gl_FragDepth`) register placement in `nak/from_nir.rs` so `oDepth` immediately follows the last color output when `writes_sample_mask` is false (Kepler+ `SM30+` pads for `oMask`, Fermi does not). Fixes corrupted depth writes when Dolphin runs with Fast Depth Calculation unchecked.
+- CI: Extract matching version notes from `CHANGELOG.md` into GitHub Release bodies.
+
+### Testing
+- Expanded `testing/vk_smoke.c` with `m2mf_blocklinear_64x64`, `graphics_bc1`, and `graphics_frag_depth` (all passing).
+
 ## [1:26.3.1-4] - 2026-11-25
 
 ### Fixed

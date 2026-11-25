@@ -13,7 +13,9 @@ SPV_HEADERS = \
 	shaders/comp_img_store.comp.spv.h \
 	shaders/comp_img_rw.comp.spv.h \
 	shaders/indexed_ubo.vert.spv.h \
-	shaders/indexed_ubo.frag.spv.h
+	shaders/indexed_ubo.frag.spv.h \
+	shaders/frag_depth.vert.spv.h \
+	shaders/frag_depth.frag.spv.h
 
 all: vk_smoke
 
