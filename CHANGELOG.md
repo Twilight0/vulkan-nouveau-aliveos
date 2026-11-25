@@ -4,6 +4,14 @@ All notable changes to **vulkan-nouveau-aliveos** will be documented in this fil
 
 ---
 
+## [1:26.3.1-4] - 2026-11-25
+
+### Fixed
+- `0004-nouveau-nvk-Fermi-NV9039-M2MF-fill-update-and-subcha.patch`:
+  - Route `nvk_cmd_fill_memory_ce` and `nvk_CmdUpdateMemoryKHR` through `NV9039` (`M2MF`) on Fermi (`cls_eng3d < KEPLER_A`), fixing `ce0: DISPATCH_ERROR [ILLEGAL_MTHD]` in Dolphin.
+  - Handle `SUBC_NV9039` in `nvk_cmd_flush_wait_dep`, `nvk_event`, and `nvk_query_pool` (fixing `Unknown subc` assertion in Dolphin).
+  - Emit `WFI` before 3D CB0 state restoration in `nvk_cmd_dispatch_fermi`.
+
 ## [1:26.3.1-3] - 2026-11-25
 
 ### Added
