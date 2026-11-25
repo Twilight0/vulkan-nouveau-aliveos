@@ -69,6 +69,11 @@ jobs:
               exit 1
             fi
           done
+          # actions/upload-artifact@v4 and GitHub Releases disallow ':' in filenames (e.g. epoch 1:26.3.1-3)
+          for f in vulkan-nouveau-aliveos-*.pkg.tar.zst; do
+            safe="${f//:/\.}"
+            [ "$f" = "$safe" ] || mv "$f" "$safe"
+          done
 
       - name: Upload Package Artifact
         uses: actions/upload-artifact@v4
